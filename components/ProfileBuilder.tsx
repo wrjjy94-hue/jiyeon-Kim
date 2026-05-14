@@ -15,47 +15,124 @@ import {
   Upload, 
   Trash2,
   Calendar,
-  Building
+  Building,
+  Cloud
 } from 'lucide-react';
+
+/* 
+Supabase Table SQL Setup:
+
+create table profiles (
+  id uuid default gen_random_uuid() primary key,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  content jsonb not null
+);
+
+-- RLS (Row Level Security) - Optional but recommended
+alter table profiles enable row level security;
+create policy "Anyone can insert" on profiles for insert with check (true);
+create policy "Anyone can select" on profiles for select using (true);
+create policy "Anyone can update" on profiles for update using (true);
+*/
 import { motion, AnimatePresence } from 'framer-motion';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import { INITIAL_DATA, ProfileData, ExperienceItem } from '@/lib/types';
 import { compressImage } from '@/lib/image-utils';
 import { refineBio } from '@/lib/gemini';
+import { supabase } from '@/lib/supabase';
 
 export default function ProfileBuilder() {
   const [data, setData] = useState<ProfileData>(INITIAL_DATA);
   const [isLoaded, setIsLoaded] = useState(false);
   const [newKeyword, setNewKeyword] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
+  const [isSupabaseLoading, setIsSupabaseLoading] = useState(false);
   const [sessionId] = useState(() => Math.floor(Math.random() * 8999) + 1000);
   const printRef = useRef<HTMLDivElement>(null);
 
-  // Load from local storage
+  // Load from Supabase/Local Storage
   useEffect(() => {
-    const saved = localStorage.getItem('smart-profile-data');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setTimeout(() => {
-          setData(curr => ({ ...curr, ...parsed }));
-          setIsLoaded(true);
-        }, 0);
-        return;
-      } catch (e) {
-        console.error('Failed to parse local storage data');
+    const init = async () => {
+      const storedId = localStorage.getItem('profile-db-id');
+      const savedLocal = localStorage.getItem('smart-profile-data');
+
+      if (storedId) {
+        try {
+          const { data: remoteData, error } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', storedId)
+            .single();
+
+          if (remoteData && !error) {
+            setData(remoteData.content);
+            setIsLoaded(true);
+            return;
+          }
+        } catch (e) {
+          console.error('Supabase fetch failed', e);
+        }
       }
-    }
-    setTimeout(() => setIsLoaded(true), 0);
+
+      if (savedLocal) {
+        try {
+          const parsed = JSON.parse(savedLocal);
+          if (parsed.name === '홍길동' || (parsed.version !== INITIAL_DATA.version)) {
+            setData(INITIAL_DATA);
+            localStorage.setItem('smart-profile-data', JSON.stringify(INITIAL_DATA));
+          } else {
+            setData(curr => ({ ...curr, ...parsed }));
+          }
+        } catch (e) {
+          console.error('Failed to parse local storage data');
+        }
+      }
+      setIsLoaded(true);
+    };
+
+    init();
   }, []);
 
-  // Save to local storage
+  // Auto-save to local storage (Supabase save will be manual/explicit for now)
   useEffect(() => {
     if (isLoaded) {
       localStorage.setItem('smart-profile-data', JSON.stringify(data));
     }
   }, [data, isLoaded]);
+
+  const saveToSupabase = async () => {
+    setIsSupabaseLoading(true);
+    try {
+      const storedId = localStorage.getItem('profile-db-id');
+      
+      if (storedId) {
+        const { error } = await supabase
+          .from('profiles')
+          .update({ content: data, updated_at: new Date().toISOString() })
+          .eq('id', storedId);
+        
+        if (error) throw error;
+        alert('Supabase에 성공적으로 저장되었습니다.');
+      } else {
+        const { data: inserted, error } = await supabase
+          .from('profiles')
+          .insert([{ content: data }])
+          .select()
+          .single();
+        
+        if (error) throw error;
+        localStorage.setItem('profile-db-id', inserted.id);
+        alert('Supabase에 새로운 프로필이 생성되었습니다.');
+      }
+    } catch (error: any) {
+      console.error('Supabase Save Error:', error);
+      alert('Supabase 저장 실패: ' + error.message);
+    } finally {
+      setIsSupabaseLoading(false);
+    }
+  };
 
   const updateField = (field: keyof ProfileData, value: any) => {
     setData(prev => ({ ...prev, [field]: value }));
@@ -198,6 +275,14 @@ export default function ProfileBuilder() {
               <input type="file" className="hidden" accept=".json" onChange={importJson} />
             </label>
             <button 
+              onClick={saveToSupabase}
+              disabled={isSupabaseLoading}
+              className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors flex items-center gap-2 disabled:opacity-50"
+            >
+              {isSupabaseLoading ? <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1 }}><Cloud size={14} /></motion.div> : <Cloud size={14} />}
+              Cloud Sync
+            </button>
+            <button 
               onClick={exportJson}
               className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors flex items-center gap-2"
             >
@@ -287,6 +372,26 @@ export default function ProfileBuilder() {
                   onChange={(e) => updateField('phone', e.target.value)}
                   className="text-sm bg-transparent flex-1 border-b border-transparent hover:border-slate-100 focus:border-indigo-500 outline-none"
                   placeholder="연락처"
+                />
+              </div>
+              <div className="flex items-center gap-3 text-slate-600 group">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 w-12 shrink-0">Birth</span>
+                <input 
+                  type="text" 
+                  value={data.birthDate || ''} 
+                  onChange={(e) => updateField('birthDate', e.target.value)}
+                  className="text-sm bg-transparent flex-1 border-b border-transparent hover:border-slate-100 focus:border-indigo-500 outline-none"
+                  placeholder="YYYY.MM.DD"
+                />
+              </div>
+              <div className="flex items-center gap-3 text-slate-600 group">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 w-12 shrink-0">Info</span>
+                <input 
+                  type="text" 
+                  value={data.gender || ''} 
+                  onChange={(e) => updateField('gender', e.target.value)}
+                  className="text-sm bg-transparent flex-1 border-b border-transparent hover:border-slate-100 focus:border-indigo-500 outline-none"
+                  placeholder="성별 등"
                 />
               </div>
             </div>
